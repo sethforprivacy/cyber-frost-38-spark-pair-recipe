@@ -1,0 +1,15 @@
+--- a/vllm/model_executor/warmup/flashinfer_autotune_cache.py
++++ b/vllm/model_executor/warmup/flashinfer_autotune_cache.py
+@@ -17,6 +17,12 @@
+ 
+ 
+ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
++    # MBX (CyberFrost B tuning): a fixed directory name lets the launcher install one pinned tactic file that
++    # holds both TP ranks' MoE keys (FlashInfer keys MoE entries by tp_rank), so every rank hits the same entries
++    # and the vllm#57423 warm-cache deadlock cannot occur; tactics no longer change from boot to boot.
++    import os as _os
++    if _pin := _os.environ.get("MBX_AUTOTUNE_HASH"):
++        return _pin
+     config_hash = runner.vllm_config.compute_hash(include_version=False)
+     return hashlib.sha256(config_hash.encode()).hexdigest()
+ 

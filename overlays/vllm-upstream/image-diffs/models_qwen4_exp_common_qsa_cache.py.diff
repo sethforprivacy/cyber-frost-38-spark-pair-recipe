@@ -1,0 +1,80 @@
+--- a/vllm/models/qwen4_exp/common/qsa_cache.py
++++ b/vllm/models/qwen4_exp/common/qsa_cache.py
+@@ -129,7 +129,9 @@
+         valid = (requests >= 0) & (requests < block_table.shape[0]) & (positions >= 0)
+         safe_requests = requests.clamp(0, block_table.shape[0] - 1)
+         physical_blocks = block_table[safe_requests, 0].long()
+-        valid &= physical_blocks >= 0
++        # vllm#59528: dummy and padding requests own no ring and sit on the null block,
++        # which must never be written.
++        valid &= physical_blocks > 0
+         slots = physical_blocks * compressor_state_size + positions.remainder(
+             compressor_state_size
+         )
+@@ -291,7 +293,8 @@
+             mask=valid,
+             other=-1,
+         )
+-        valid &= physical_block >= 0
++        # vllm#59528: dummy and padding requests own no ring and sit on the null block.
++        valid &= physical_block > 0
+         slot = physical_block * circular_buffer_size + (
+             logical_position % circular_buffer_size
+         )
+@@ -417,7 +420,7 @@
+         visible_blocks,
+         slot_mapping,
+         k_work_metadata_buffer,
+-        num_mapped_tokens=int(common_attn_metadata.query_start_loc_cpu[-1]),
++        num_mapped_tokens=min(int(common_attn_metadata.query_start_loc_cpu[-1]), num_tokens),  # vllm#58040
+         storage_block_size=storage_block_size,
+         compress_ratio=compress_ratio,
+         circular_buffer_size=circular_buffer_size,
+@@ -513,7 +516,8 @@
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+     del request_capacity
+     num_tokens = common_attn_metadata.num_actual_tokens
+-    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
++    # Graph padding can make the final query offset exceed the real token count (vllm#58040).
++    num_mapped_tokens = min(int(common_attn_metadata.query_start_loc_cpu[-1]), num_tokens)
+     logical_positions = logical_positions_buffer[:num_tokens]
+     visible_blocks = visible_blocks_buffer[:num_tokens]
+ 
+@@ -751,7 +755,7 @@
+             visible_blocks=visible_blocks,
+             k_work_metadata=k_work_metadata,
+             common_slot_mapping=common_attn_metadata.slot_mapping,
+-            num_mapped_tokens=int(common_attn_metadata.query_start_loc_cpu[-1]),
++            num_mapped_tokens=min(int(common_attn_metadata.query_start_loc_cpu[-1]), num_tokens),  # vllm#58040
+             num_actual_tokens=num_tokens,
+             num_decodes=num_decodes,
+             num_decode_tokens=num_decode_tokens,
+@@ -892,16 +896,19 @@
+             )
+         super().__init__(head_size=storage_head_size, **kwargs)
+ 
+-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+-        super().bind_kv_cache(kv_cache)
+-        qsa_cache = self.kv_cache
+-        self.key_cache = qsa_cache[..., : self.key_head_size]
+-        if self.cache_rope_positions:
+-            position_tail = qsa_cache[..., self.rope_position_offset :]
+-            self.rope_position_cache = position_tail.view(torch.int64)
+-        else:
+-            self.rope_position_cache = None
++    # Derived on access so `kv_cache` stays the only reference to the bound
++    # storage: clearing it (e.g. after CUDA graph memory profiling) must free
++    # the cache, or the freed block stays pinned in the allocator.
++    @property
++    def key_cache(self) -> torch.Tensor:
++        return self.kv_cache[..., : self.key_head_size]
+ 
++    @property
++    def rope_position_cache(self) -> torch.Tensor | None:
++        if not self.cache_rope_positions:
++            return None
++        return self.kv_cache[..., self.rope_position_offset :].view(torch.int64)
++
+     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+         # Hold the open group's committed keys plus every row a speculative
+         # step stores before acceptance is known, rounded up to whole groups so

@@ -1,0 +1,57 @@
+--- a/vllm/models/qwen4_exp/nvidia/mtp.py
++++ b/vllm/models/qwen4_exp/nvidia/mtp.py
+@@ -415,6 +415,34 @@
+         if _mbx_draft_scale != 1.0:
+             print(f"MBX MTP: draft logits scale = {_mbx_draft_scale} (MBX_MTP_DRAFT_SCALE)", flush=True)
+         self.logits_processor = LogitsProcessor(config.vocab_size, scale=_mbx_draft_scale)
++        # MBX draft head: a drafting-only quantized copy of the output head (MBX_DRAFT_HEAD=1). The proposer
++        # still shares the target's BF16 lm_head for everything else; only draft logits use this copy, so the
++        # verified output distribution is unchanged (rejection sampling) and only acceptance can move.
++        if _os.environ.get("MBX_DRAFT_HEAD", "0") == "1" and get_pp_group().is_last_rank:
++            # quant prefix must avoid the checkpoint ModelOpt ignore patterns ("mtp*" wildcard, "lm_head" substring)
++            _dh_prefix = "dh4"
++            # MBX reduced draft vocabulary (FR-Spec style, tuning 2026-10-01): MBX_DRAFT_VOCAB names a JSON with the
++            # sorted token ids the draft head covers (draft_head_sub.py); its logits are scattered into the full
++            # vocabulary with -inf elsewhere, so those tokens are never drafted. Outputs stay exact.
++            self._mbx_dv_ids = None
++            _dv = _os.environ.get("MBX_DRAFT_VOCAB")
++            _dh_rows = config.vocab_size
++            if _dv:
++                import json as _json
++                with open(_dv) as _f:
++                    _ids = _json.load(_f)["ids"]
++                self._mbx_dv_ids = torch.tensor(_ids, dtype=torch.long)
++                _dh_rows = len(_ids)
++                self._mbx_dv_logits = LogitsProcessor(_dh_rows, scale=_mbx_draft_scale)
++                print(f"MBX draft vocabulary: {_dh_rows} of {config.vocab_size} tokens ({_dv})", flush=True)
++            self.model.draft_head = ParallelLMHead(
++                _dh_rows,
++                config.hidden_size,
++                quant_config=vllm_config.quant_config,
++                prefix=_dh_prefix,
++            )
++            print(f"MBX draft head: prefix {_dh_prefix}, method "
++                  f"{type(self.model.draft_head.quant_method).__name__}", flush=True)
+         self.make_empty_intermediate_tensors = (
+             self.model.make_empty_intermediate_tensors
+         )
+@@ -445,7 +473,18 @@
+     def compute_logits(
+         self, hidden_states: torch.Tensor, spec_step_idx: int = 0
+     ) -> torch.Tensor | None:
+-        return self.logits_processor(self.lm_head, hidden_states)
++        head = getattr(self.model, "draft_head", None)  # MBX draft head
++        ids = getattr(self, "_mbx_dv_ids", None)
++        if head is not None and ids is not None:
++            sub = self._mbx_dv_logits(head, hidden_states)
++            if sub is None:
++                return None
++            if ids.device != sub.device:
++                self._mbx_dv_ids = ids = ids.to(sub.device)
++            full = sub.new_full((sub.shape[0], self.config.vocab_size), float("-inf"))
++            full.index_copy_(1, ids, sub[:, : ids.numel()])
++            return full
++        return self.logits_processor(head if head is not None else self.lm_head, hidden_states)
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+         def remap_weight_names():

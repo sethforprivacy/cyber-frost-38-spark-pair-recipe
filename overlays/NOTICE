@@ -1,0 +1,47 @@
+vLLM file overlays for the CYBER-FROST-3.8 two-Spark recipe
+==========================================================
+
+These directories are bind-mounted read-only over the vLLM package of the image
+myllmbox/qwen38-flash-next-cluster-vllm@sha256:861ac752164e0d723c5eff3f876586c6678c26ad4a516112c48745f6a101ff4d
+(image ID sha256:4d03fc80b2c28088808115eec524cb36732c8181b13ba15085095fa927b91815; vLLM 0.30.0 plus myllmbox's
+changes) by launcher/vllm-rank.sh, after `sha256sum -c` of each directory's SHA256SUMS. Each listed path is relative
+to the vllm package (/usr/local/lib/python3.12/dist-packages/vllm/). They are identical to the overlays in
+production on our pair on 2026-10-03, apart from one comment line in vllm-roce/.../cyber_roce_ar.py (a reference to
+a private repository replaced by the public one); do not edit them without regenerating SHA256SUMS, and rebuild
+them from the new
+image's copies if you change the image.
+
+Origin and licence
+------------------
+Every .py file below, except vllm-roce/distributed/device_communicators/cyber_roce_ar.py, is a MODIFIED COPY of a
+file from the vLLM project (https://github.com/vllm-project/vllm), taken from the image named above (which carries
+myllmbox's own changes to some of them). vLLM is licensed under the Apache License, Version 2.0 ("Copyright
+contributors to the vLLM project"); the copies keep their SPDX headers. Our modifications (2026-09-29 to 2026-10-03)
+are licensed under Apache-2.0 as well (text: ../LICENSES/Apache-2.0.txt).
+
+  vllm-upstream/   v1/attention/backends/mamba_attn.py, v1/attention/backends/short_conv_attn.py,
+                   model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py, models/qwen4_exp/common/qsa_cache.py,
+                   models/qwen4_exp/nvidia/ple_layer.py, models/qwen4_exp/nvidia/ops/qsa_indexer.py,
+                   models/qwen4_exp/nvidia/qsa.py, models/qwen4_exp/nvidia/ops/qsa.py
+                   Ports of vllm-project/vllm#58114, #57039, #58961, #57105, #58040 (hand-ported onto myllmbox's
+                   qsa_cache.py), #59528 and #55557 to the image's files. upstream-prs/ = the upstream diffs these
+                   were ported from (reference only, not mounted).
+
+  vllm-gb10/       models/qwen4_exp/nvidia/low_latency_gemm.py: SM12x (GB10) TP2 plans for the Qwen4Exp CuTe-DSL
+                   skinny decode GEMM, from kernel-tuning/skinny_tune.py.
+                   model_executor/warmup/flashinfer_autotune_cache.py: a fixed tactic-cache directory name
+                   (MBX_AUTOTUNE_HASH), so the pinned tactic file in launcher/ is read on every boot.
+
+  vllm-draft/      models/qwen4_exp/nvidia/mtp.py: the draft-only quantized output head (MBX_DRAFT_HEAD, quant prefix
+                   dh4) and its reduced vocabulary (MBX_DRAFT_VOCAB).
+
+  vllm-roce/       distributed/device_communicators/cuda_communicator.py (modified copy: hooks that route all-reduces
+                   up to CYBER_ROCE_AR_MAX bytes to cyber_roce_ar)
+                   distributed/device_communicators/cyber_roce_ar.py (NEW FILE, Apache-2.0): a 2-rank one-shot
+                   all-reduce over both PCIe halves of the cabled CX-7 port, adapted from b12x's RoCEnante.
+                   Needs b12x (https://github.com/local-inference-lab/b12x, Apache-2.0, commit
+                   e4084d2eef4932e0fa06db3f7a94deb83ad132d7), which is NOT included here; the launcher mounts a
+                   checkout read-only (B12X=<short sha>).
+
+image-diffs/ (each set) = our unified diff of every file against the image's copy; upstream-prs/ = upstream sources.
+Both are documentation; only the paths listed in each SHA256SUMS are mounted.

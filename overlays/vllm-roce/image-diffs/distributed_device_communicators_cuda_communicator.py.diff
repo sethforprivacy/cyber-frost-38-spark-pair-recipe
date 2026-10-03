@@ -1,0 +1,46 @@
+--- a/vllm/distributed/device_communicators/cuda_communicator.py
++++ b/vllm/distributed/device_communicators/cuda_communicator.py
+@@ -102,6 +102,12 @@
+             )
+             if is_symmetric_memory_enabled():
+                 register_nccl_symmetric_ops(self.pynccl_comm)
++
++        # CYBER_ROCE_AR=1 (CyberFrost B, 2026-10-01): RoCEnante one-shot all-reduce for the 2-rank TP group
++        # (cyber_roce_ar.py, adapted from the C+D lane's mimo_roce_rd.py); None otherwise.
++        from vllm.distributed.device_communicators.cyber_roce_ar import maybe_create as _cyber_roce_create
++
++        self.cyber_roce = _cyber_roce_create(unique_name, self.cpu_group, self.device, self.world_size)
+ 
+         self.ca_comm: CustomAllreduce | None = None
+         self.qr_comm: QuickAllReduce | None = None
+@@ -325,6 +331,9 @@
+         )
+ 
+     def all_reduce(self, input_):
++        cyber_roce = getattr(self, "cyber_roce", None)
++        if cyber_roce is not None and cyber_roce.should_allreduce(input_):
++            return cyber_roce.all_reduce(input_)
+         fi_ar_comm = self.fi_ar_comm
+         use_fi_ar = (
+             fi_ar_comm is not None
+@@ -412,6 +421,10 @@
+         return ca_comm.custom_reduce_scatter(input_.contiguous())
+ 
+     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
++        # CYBER_ROCE_AR: graph replays cannot report a RoCE timeout inline; the eager logits all-gather of every step
++        # checks the runtime's health and raises on a poisoned runtime.
++        if getattr(self, "cyber_roce", None) is not None and not torch.cuda.is_current_stream_capturing():
++            self.cyber_roce.check_health()
+         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
+         # enabled (mirrors reduce_scatter); otherwise fall back to the
+         # PyNccl/base-class all-gather. Sequence parallelism's
+@@ -651,6 +664,9 @@
+             raise ValueError("No PyNCCL communicator found")
+ 
+     def destroy(self):
++        if getattr(self, "cyber_roce", None) is not None:
++            self.cyber_roce.close()
++            self.cyber_roce = None
+         if self.pynccl_comm is not None:
+             self.pynccl_comm.destroy()
+             self.pynccl_comm = None

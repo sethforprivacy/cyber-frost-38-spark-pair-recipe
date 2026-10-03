@@ -1,0 +1,6 @@
+# Keep these byte-exact (no line-ending normalisation): every overlay file is sha-checked before it is mounted, and
+# the pinned tactic file and draft vocabulary are data.
+overlays/** -text
+launcher/pinned-autotune-moe-v1.json -text
+view/draft-vocab-ids.json -text
+view/VIEW.sha256 -text
